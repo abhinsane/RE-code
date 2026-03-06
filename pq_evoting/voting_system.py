@@ -382,6 +382,23 @@ class ElectionAuthority:
         return result
 
     # ------------------------------------------------------------------
+    # Public accessors (avoid GUI/tests touching private attributes)
+    # ------------------------------------------------------------------
+
+    @property
+    def authority_sig_pk(self) -> bytes:
+        """ML-DSA-65 public key of the authority (for signature verification)."""
+        return self._kp.sig_pk
+
+    def get_voter_reg(self, voter_id: str):
+        """Return the VoterRegistration for voter_id, or None if not found."""
+        return self._registry.get(voter_id)
+
+    def chain_blocks(self) -> list:
+        """Return a snapshot of the mined block list (read-only view)."""
+        return list(self._chain.chain)
+
+    # ------------------------------------------------------------------
     # Blockchain statistics
     # ------------------------------------------------------------------
 

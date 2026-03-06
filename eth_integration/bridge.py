@@ -310,6 +310,11 @@ class EthBridge:
     contract_address : str or None
         Address of an already-deployed ``VotingLedger`` contract.
         Only used when *rpc_url* is set.
+    eth_private_key : str or None
+        0x-prefixed hex private key for signing transactions on an external
+        node (required for testnets/mainnet; not needed for Ganache/Hardhat
+        which expose unlocked accounts).  Falls back to the ``ETH_PRIVATE_KEY``
+        environment variable if not supplied here.
 
     Attributes
     ----------
@@ -324,10 +329,12 @@ class EthBridge:
         election_id: str,
         rpc_url: Optional[str] = None,
         contract_address: Optional[str] = None,
+        eth_private_key: Optional[str] = None,
     ) -> None:
-        self.election_id = election_id
-        self._rpc_url    = rpc_url or os.environ.get("ETH_RPC_URL")
-        self._ext_addr   = contract_address or os.environ.get("ETH_CONTRACT_ADDR")
+        self.election_id      = election_id
+        self._rpc_url         = rpc_url or os.environ.get("ETH_RPC_URL")
+        self._ext_addr        = contract_address or os.environ.get("ETH_CONTRACT_ADDR")
+        self._eth_private_key = eth_private_key or os.environ.get("ETH_PRIVATE_KEY", "")
 
         if self._rpc_url:
             self._setup_external()
@@ -356,15 +363,49 @@ class EthBridge:
         )
 
     def _setup_external(self) -> None:
-        """Connect to an external Ethereum node and load/deploy the contract."""
+        """Connect to an external Ethereum node and load/deploy the contract.
+
+        Account resolution (in priority order):
+          1. ``eth_private_key`` constructor argument.
+          2. ``ETH_PRIVATE_KEY`` environment variable (0x-prefixed hex).
+          3. ``self._w3.eth.accounts[0]`` — only works when the node has
+             unlocked accounts (Ganache / Hardhat local).  Will raise on
+             testnets/mainnet where accounts are not unlocked.
+        """
         self._w3 = Web3(Web3.HTTPProvider(self._rpc_url))
         if not self._w3.is_connected():
             raise ConnectionError(
                 f"Cannot connect to Ethereum node at {self._rpc_url}"
             )
-        self._account  = self._w3.eth.accounts[0]
-        self.chain_id  = self._w3.eth.chain_id
+
+        self.chain_id     = self._w3.eth.chain_id
         self.network_name = f"External node ({self._rpc_url}, chain {self.chain_id})"
+
+        # ── Account / signing setup ──────────────────────────────────────────
+        raw_pk = self._eth_private_key or os.environ.get("ETH_PRIVATE_KEY", "")
+        if raw_pk:
+            # Use an explicit private key — works on testnets & mainnet
+            from eth_account import Account as EthAccount  # lazy import
+            acct = EthAccount.from_key(raw_pk)
+            self._w3.middleware_onion.inject(
+                __import__(
+                    "web3.middleware",
+                    fromlist=["construct_sign_and_send_raw_middleware"],
+                ).construct_sign_and_send_raw_middleware(acct),
+                layer=0,
+            )
+            self._account = acct.address
+        else:
+            # Fall back to node-unlocked accounts (Ganache / Hardhat only)
+            accounts = self._w3.eth.accounts
+            if not accounts:
+                raise RuntimeError(
+                    "No unlocked accounts found on the Ethereum node and "
+                    "ETH_PRIVATE_KEY is not set.  Provide a funded private key "
+                    "via the ETH_PRIVATE_KEY environment variable or the "
+                    "eth_private_key constructor argument."
+                )
+            self._account = accounts[0]
 
         if self._ext_addr:
             self._sol_contract = self._w3.eth.contract(
@@ -374,15 +415,15 @@ class EthBridge:
             self.contract_address = self._ext_addr
             self.deploy_tx_hash   = "0x" + "0" * 64
         else:
-            # Deploy the contract (requires a funded account and compiled bytecode)
             raise RuntimeError(
                 "External mode requires ETH_CONTRACT_ADDR pointing to a "
                 "deployed VotingLedger contract.  "
-                "See eth_integration/deploy_real.py for deployment instructions."
+                "See contracts/VotingLedger.sol for deployment instructions."
             )
         self._mode = "external"
         print(
             f"[EthBridge] Connected to external Ethereum node.\n"
+            f"  Account  : {self._account}\n"
             f"  Contract : {self.contract_address}\n"
             f"  Network  : {self.network_name}"
         )
