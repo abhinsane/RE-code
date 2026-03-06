@@ -233,12 +233,13 @@ class ElectionAuthority:
 
         # ---- Biometric authentication gate --------------------------------
         # The voter MUST have passed biometric verification (via authenticate())
-        # in this session before their ballot is accepted.  This check ensures
-        # that no vote can be counted without a successful biometric match,
-        # even if the ballot was crafted and submitted directly.
+        # in this session AND within the AUTH_SESSION_TIMEOUT window before
+        # their ballot is accepted.  is_authenticated() auto-expires stale
+        # tokens so a voter who authenticated hours ago cannot still vote.
         if not self._registry.is_authenticated(voter_id):
             print(
-                f"[Authority] Vote NULLIFIED — biometric not verified: {voter_id[:8]}…"
+                f"[Authority] Vote NULLIFIED — biometric not verified or session "
+                f"expired: {voter_id[:8]}…"
             )
             return False
 
@@ -367,6 +368,7 @@ class ElectionAuthority:
 
         self._finalized = True
         self._active    = False
+        self._fhe.seal()   # unlock audit-only decrypt_single_vote after polls close
 
         # Print summary
         print("\n[Authority] ══════ ELECTION RESULTS ══════")

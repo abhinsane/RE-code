@@ -11,8 +11,9 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+from .config import AUTH_SESSION_TIMEOUT
 from .pq_crypto import sha3_256
 
 
@@ -46,9 +47,10 @@ class VoterRegistration:
     sig_pk:        bytes = field(default=b"")
     biometric_data: dict = field(default_factory=dict)
     registered_at:  float = field(default_factory=time.time)
-    is_active:      bool  = True
-    has_voted:      bool  = False
-    bio_authenticated: bool = False   # set to True only after biometric passes
+    is_active:          bool          = True
+    has_voted:          bool          = False
+    bio_authenticated:  bool          = False   # set to True only after biometric passes
+    bio_auth_time:      Optional[float] = None  # unix timestamp of last successful auth
 
     def __post_init__(self) -> None:
         if not self.voter_id_hash:
@@ -103,23 +105,42 @@ class VoterRegistry:
 
         Must be called by the authority after a successful authenticate()
         before receive_vote() will accept a ballot from this voter.
+        Records the current timestamp so the token can be expired after
+        AUTH_SESSION_TIMEOUT seconds.
         """
         reg = self._records.get(voter_id)
         if reg is None or not reg.is_active:
             return False
         reg.bio_authenticated = True
+        reg.bio_auth_time     = time.time()
         return True
 
     def is_authenticated(self, voter_id: str) -> bool:
-        """Return True iff the voter passed biometric auth this session."""
+        """
+        Return True iff the voter passed biometric auth this session AND
+        the session has not expired (within AUTH_SESSION_TIMEOUT seconds).
+
+        Previously had no expiry: a token set at poll-open would remain valid
+        until the voter cast their vote, allowing indefinite time between
+        authentication and ballot submission.
+        """
         reg = self._records.get(voter_id)
-        return bool(reg and reg.bio_authenticated)
+        if not (reg and reg.bio_authenticated and reg.bio_auth_time is not None):
+            return False
+        elapsed = time.time() - reg.bio_auth_time
+        if elapsed > AUTH_SESSION_TIMEOUT:
+            # Expire the stale token automatically
+            reg.bio_authenticated = False
+            reg.bio_auth_time     = None
+            return False
+        return True
 
     def clear_authentication(self, voter_id: str) -> None:
-        """Clear the biometric auth flag (called after vote is cast)."""
+        """Clear the biometric auth flag and timestamp (called after vote is cast)."""
         reg = self._records.get(voter_id)
         if reg:
             reg.bio_authenticated = False
+            reg.bio_auth_time     = None
 
     def mark_voted(self, voter_id: str) -> bool:
         """
@@ -150,15 +171,19 @@ class VoterRegistry:
     def all_public_records(self) -> list:
         return [r.public_record() for r in self._records.values()]
 
-    def authenticated_not_voted(self) -> list:
+    def authenticated_not_voted(self) -> List[str]:
         """
         Return the voter IDs of voters who passed biometric authentication
         in this session but whose ballot was never recorded.
 
         Used by ElectionAuthority.finalize() to detect and clear dangling
         authentication tokens without accessing the private _records dict.
+        Only non-expired tokens are included.
         """
+        now = time.time()
         return [
             vid for vid, reg in self._records.items()
             if reg.bio_authenticated
+            and reg.bio_auth_time is not None
+            and (now - reg.bio_auth_time) <= AUTH_SESSION_TIMEOUT
         ]
