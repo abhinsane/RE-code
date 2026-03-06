@@ -116,17 +116,29 @@ class Block:
     # ------------------------------------------------------------------
 
     def compute_merkle_root(self) -> str:
-        """SHA3-256 Merkle root of all vote records."""
+        """SHA3-256 Merkle root of all vote records.
+
+        Domain separation prefixes (RFC 6962 / Certificate Transparency style):
+            0x00  — leaf node hash
+            0x01  — internal node hash
+
+        Without these prefixes the tree is vulnerable to a second-preimage
+        attack: a 64-byte internal node value could be parsed as two 32-byte
+        leaf hashes, letting an adversary swap vote records for crafted
+        internal-node preimages that produce the same root.
+        """
         if not self.votes:
             return sha3_256(b"empty_block").hex()
 
-        layer: List[bytes] = [sha3_256(v.serialise()) for v in self.votes]
+        # Leaf hashes: 0x00 || serialised vote record
+        layer: List[bytes] = [sha3_256(b"\x00" + v.serialise()) for v in self.votes]
 
         while len(layer) > 1:
             if len(layer) % 2:
                 layer.append(layer[-1])   # duplicate last leaf
+            # Internal hashes: 0x01 || left_child || right_child
             layer = [
-                sha3_256(layer[i] + layer[i + 1])
+                sha3_256(b"\x01" + layer[i] + layer[i + 1])
                 for i in range(0, len(layer), 2)
             ]
 
