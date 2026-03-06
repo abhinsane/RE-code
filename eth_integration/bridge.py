@@ -37,10 +37,21 @@ import time
 from typing import Any, Dict, List, Optional
 
 from web3 import Web3
-from web3.middleware import construct_sign_and_send_raw_middleware
 from eth_account import Account as EthAccount
 from eth_tester import EthereumTester
 from eth_tester.backends.pyevm import PyEVMBackend
+
+# web3.py v7 renamed the signing middleware; support both versions.
+try:
+    # web3 >= 7.0
+    from web3.middleware import SignAndSendRawMiddlewareBuilder as _SigMW
+    def _inject_signing_middleware(w3: Web3, account) -> None:
+        w3.middleware_onion.inject(_SigMW.build(account), layer=0)
+except ImportError:
+    # web3 < 7.0
+    from web3.middleware import construct_sign_and_send_raw_middleware as _build_mw  # type: ignore
+    def _inject_signing_middleware(w3: Web3, account) -> None:  # type: ignore[misc]
+        w3.middleware_onion.inject(_build_mw(account), layer=0)
 
 # ---------------------------------------------------------------------------
 # ABI  (matches VotingLedger.sol)
@@ -387,10 +398,7 @@ class EthBridge:
         if self._eth_private_key:
             # Use an explicit private key — works on testnets & mainnet
             acct = EthAccount.from_key(self._eth_private_key)
-            self._w3.middleware_onion.inject(
-                construct_sign_and_send_raw_middleware(acct),
-                layer=0,
-            )
+            _inject_signing_middleware(self._w3, acct)
             self._account = acct.address
         else:
             # Fall back to node-unlocked accounts (Ganache / Hardhat only)
