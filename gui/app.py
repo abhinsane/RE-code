@@ -159,7 +159,7 @@ with st.sidebar:
         n_cand = S.public_params["num_candidates"]
         st.markdown(f"**Candidates**: {n_cand}")
         st.markdown(f"**Registered**: {len(S.voters)}")
-        voted = sum(1 for l in S.vote_log if l.get("accepted"))
+        voted = sum(1 for l in S.vote_log if l.get("accepted") is True)
         st.markdown(f"**Votes cast**: {voted}")
 
     if S.eth_bridge is not None:
@@ -471,7 +471,6 @@ with tab_vote:
         col1, col2 = st.columns([2, 3])
 
         with col1:
- claude/post-quantum-evoting-system-W2QQV
             # ── STEP 1: Biometric Authentication ─────────────────────────
             st.subheader("Step 1 — Biometric Authentication")
 
@@ -483,17 +482,6 @@ with tab_vote:
             ]
 
             with st.form("auth_form"):
-=======
-            st.subheader("Ballot")
-
-            with st.form("vote_form"):
-                voter_ids     = list(S.voters.keys())
-                eligible_ids  = [
-                    vid for vid in voter_ids
-                    if not S.authority._registry.get(vid) or
-                       not S.authority._registry.get(vid).has_voted
-                ]
- main
                 selected_voter = st.selectbox(
                     "Select voter",
                     options=eligible_ids,
@@ -562,14 +550,17 @@ with tab_vote:
                         "required before a ballot can be cast. "
                         "Verify your PIN and fingerprint, then try again."
                     )
-                    S.vote_log.append({
-                        "voter_id":  ar["voter_id"],
-                        "candidate": "—",
-                        "accepted":  False,
-                        "reason":    "Biometric auth failed",
-                        "bio_score": ar["score"],
-                        "timestamp": time.time(),
-                    })
+                    # Log once only (prevent duplicate entries on reruns)
+                    if not ar.get("logged"):
+                        S.vote_log.append({
+                            "voter_id":  ar["voter_id"],
+                            "candidate": "—",
+                            "accepted":  False,
+                            "reason":    "Biometric auth failed",
+                            "bio_score": ar["score"],
+                            "timestamp": time.time(),
+                        })
+                        ar["logged"] = True
                     if st.button("🔄 Try Again", key="retry_auth"):
                         S.auth_result = None
                         st.rerun()
@@ -804,6 +795,22 @@ with tab_results:
                     )
 
             st.markdown(f"**Total votes cast**: {total}")
+
+            nullified = results.get("nullified_count", 0)
+            bio_blocked = sum(
+                1 for l in S.vote_log
+                if not l.get("accepted") and l.get("reason") == "Biometric auth failed"
+            )
+            if bio_blocked or nullified:
+                st.markdown(
+                    f"**Biometric-blocked attempts**: {bio_blocked} "
+                    f"(votes blocked at auth gate — NOT counted)"
+                )
+            if nullified:
+                st.warning(
+                    f"⚠️ {nullified} voter(s) passed biometric but no ballot was "
+                    "received — their auth token was nullified at finalization."
+                )
 
             if len(sorted_cands) > 1:
                 top   = counts.get(sorted_cands[0], 0)

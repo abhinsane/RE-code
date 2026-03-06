@@ -48,6 +48,7 @@ class VoterRegistration:
     registered_at:  float = field(default_factory=time.time)
     is_active:      bool  = True
     has_voted:      bool  = False
+    bio_authenticated: bool = False   # set to True only after biometric passes
 
     def __post_init__(self) -> None:
         if not self.voter_id_hash:
@@ -95,6 +96,30 @@ class VoterRegistry:
 
     def get(self, voter_id: str) -> Optional[VoterRegistration]:
         return self._records.get(voter_id)
+
+    def mark_authenticated(self, voter_id: str) -> bool:
+        """
+        Record that a voter passed biometric verification this session.
+
+        Must be called by the authority after a successful authenticate()
+        before receive_vote() will accept a ballot from this voter.
+        """
+        reg = self._records.get(voter_id)
+        if reg is None or not reg.is_active:
+            return False
+        reg.bio_authenticated = True
+        return True
+
+    def is_authenticated(self, voter_id: str) -> bool:
+        """Return True iff the voter passed biometric auth this session."""
+        reg = self._records.get(voter_id)
+        return bool(reg and reg.bio_authenticated)
+
+    def clear_authentication(self, voter_id: str) -> None:
+        """Clear the biometric auth flag (called after vote is cast)."""
+        reg = self._records.get(voter_id)
+        if reg:
+            reg.bio_authenticated = False
 
     def mark_voted(self, voter_id: str) -> bool:
         """
