@@ -1,6 +1,6 @@
 # Post-Quantum Secure E-Voting System
 
-A production-grade electronic voting system combining **Blockchain**, **Fully Homomorphic Encryption (FHE)**, **Zero-Knowledge Proofs (ZKP)**, **Post-Quantum Cryptography (PQC)**, and **Cancellable Biometrics** — designed to be secure against quantum adversaries.
+A proto-type for electronic voting system combining **Blockchain**, **Fully Homomorphic Encryption (FHE)**, **Zero-Knowledge Proofs (ZKP)**, **Post-Quantum Cryptography (PQC)**, and **Cancellable Biometrics** — designed to be secure against quantum adversaries.
 
 ---
 

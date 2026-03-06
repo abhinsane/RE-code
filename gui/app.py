@@ -218,7 +218,7 @@ with tab_setup:
                 )
                 raw_candidates = st.text_area(
                     "Candidates (one per line)",
-                    value="Alice\nBob\nCarol",
+                    value="Modi\nRahul\nKejriwal\nMamta",
                     height=120,
                 )
                 st.divider()
@@ -471,17 +471,29 @@ with tab_vote:
         col1, col2 = st.columns([2, 3])
 
         with col1:
+ claude/post-quantum-evoting-system-W2QQV
             # ── STEP 1: Biometric Authentication ─────────────────────────
             st.subheader("Step 1 — Biometric Authentication")
 
             voter_ids    = list(S.voters.keys())
             eligible_ids = [
                 vid for vid in voter_ids
-                if not S.authority._registry.get(vid, None) or
+                if not S.authority._registry.get(vid) or
                    not S.authority._registry.get(vid).has_voted
             ]
 
             with st.form("auth_form"):
+=======
+            st.subheader("Ballot")
+
+            with st.form("vote_form"):
+                voter_ids     = list(S.voters.keys())
+                eligible_ids  = [
+                    vid for vid in voter_ids
+                    if not S.authority._registry.get(vid) or
+                       not S.authority._registry.get(vid).has_voted
+                ]
+ main
                 selected_voter = st.selectbox(
                     "Select voter",
                     options=eligible_ids,
