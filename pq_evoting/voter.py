@@ -149,3 +149,16 @@ class VoterRegistry:
 
     def all_public_records(self) -> list:
         return [r.public_record() for r in self._records.values()]
+
+    def authenticated_not_voted(self) -> list:
+        """
+        Return the voter IDs of voters who passed biometric authentication
+        in this session but whose ballot was never recorded.
+
+        Used by ElectionAuthority.finalize() to detect and clear dangling
+        authentication tokens without accessing the private _records dict.
+        """
+        return [
+            vid for vid, reg in self._records.items()
+            if reg.bio_authenticated
+        ]

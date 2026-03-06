@@ -44,9 +44,16 @@ from .pq_crypto import pq_encrypt, pq_decrypt, shake256
 # ---------------------------------------------------------------------------
 
 def _token_to_seed(user_token: bytes) -> int:
-    """Derive a 64-bit integer RNG seed from the user token via SHAKE256."""
-    seed_bytes = shake256(b"biohash_rng_seed" + user_token, 8)
-    return int.from_bytes(seed_bytes, "big") % (2**32)
+    """Derive a 256-bit integer RNG seed from the user token via SHAKE256.
+
+    The previous implementation derived only 8 bytes then reduced mod 2^32,
+    collapsing the seed space to ~4 billion values.  An attacker who has the
+    encrypted BioHash template could recover the token in seconds by trying
+    all 2^32 seeds.  Using 32 bytes (256-bit seed) makes this infeasible.
+    np.random.default_rng accepts arbitrarily large integers.
+    """
+    seed_bytes = shake256(b"biohash_rng_seed" + user_token, 32)
+    return int.from_bytes(seed_bytes, "big")
 
 
 # ---------------------------------------------------------------------------

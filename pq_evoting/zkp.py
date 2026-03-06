@@ -60,8 +60,14 @@ from .pq_crypto import sha3_256, shake256
 # ---------------------------------------------------------------------------
 
 def _fiat_shamir(data: bytes, modulus: int) -> int:
-    """Integer Fiat-Shamir challenge derived via SHA3-256, reduced mod q."""
-    return int.from_bytes(sha3_256(data)[:4], "big") % modulus
+    """Integer Fiat-Shamir challenge derived via SHA3-256, reduced mod q.
+
+    Uses all 32 bytes of the SHA3-256 digest before reducing mod q to
+    minimise statistical bias and give a 256-bit challenge pre-image.
+    The previous implementation used only 4 bytes (32-bit entropy), making
+    the soundness error ~2^{-32} instead of ~2^{-256}.
+    """
+    return int.from_bytes(sha3_256(data), "big") % modulus
 
 
 def _sample_short(m: int, beta: int, rng: np.random.Generator) -> np.ndarray:
@@ -172,27 +178,136 @@ class LatticeZKP:
             return False
 
     # ------------------------------------------------------------------
-    # Per-bit proof (for range proof building block)
+    # Per-bit proof — CDS (Cramer-Damgård-Schoenmakers) 1-of-2 OR proof
     # ------------------------------------------------------------------
+    #
+    # Proves that C_bit is a commitment to 0 OR a commitment to 1 without
+    # revealing which.  Uses the standard CDS composition of two Sigma
+    # protocols where the challenges must sum (mod q) to the Fiat-Shamir
+    # global challenge.
+    #
+    # Branch assignments
+    # ~~~~~~~~~~~~~~~~~~
+    # Let b ∈ {0, 1} be the actual bit and T_i = C - i·e₀.
+    # Branch i proves knowledge of r s.t.  A·r ≡ T_i  (mod q).
+    # Real branch : i = b   (prover knows r_b)
+    # Fake branch : i = 1-b (simulated without knowledge)
+    #
+    # Proof steps
+    # ~~~~~~~~~~~
+    # 1. Simulate fake branch: pick c_fake, z_fake;
+    #    set w_fake = A·z_fake − c_fake·T_{1-b}  (mod q)
+    # 2. Real announcement: pick ρ; set w_real = A·ρ
+    # 3. Fiat-Shamir: c = FS(w_0 ‖ w_1 ‖ T_0 ‖ T_1 ‖ ctx) mod q
+    # 4. Real challenge: c_real = (c − c_fake) mod q
+    # 5. Real response : z_real = ρ + c_real · r_b
+    #
+    # Verification (no knowledge of b required)
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    # Check (c_0 + c_1) ≡ FS(w_0 ‖ w_1 ‖ T_0 ‖ T_1 ‖ ctx)  (mod q)
+    # Check A·z_0 ≡ w_0 + c_0·T_0  (mod q)
+    # Check A·z_1 ≡ w_1 + c_1·T_1  (mod q)
+    #
+    # The previous implementation generated a simulated commitment that
+    # _verify_bit never checked (only called _sigma_verify on one branch),
+    # so the "OR" structure was not enforced at all.
 
     def _prove_bit(
         self, bit: int, r_bit: np.ndarray, C_bit: np.ndarray, ctx: bytes
     ) -> dict:
-        sigma = self._sigma_prove(bit, r_bit, C_bit, ctx)
-        # Simulated proof for complementary bit (OR-structure documentation)
-        other  = 1 - bit
-        rng_s  = _rng_from(shake256(ctx + b":sim", 32))
-        r_sim  = _sample_short(self.m, self.beta, rng_s)
-        C_sim  = self._commit(other, r_sim)
-        e_sim  = _fiat_shamir(C_sim.tobytes() + b":sim" + ctx, self.q)
+        b     = int(bit)
+        other = 1 - b
+
+        # Adjusted targets: T_i = C_bit - i·e0
+        T: list = [C_bit.copy(), (C_bit - self.e0) % self.q]
+
+        # ---- Simulated (fake) branch for index `other` ----------------
+        rng_sim  = _rng_from(shake256(ctx + b":or_sim" + bytes([b]), 32))
+        c_fake   = int(rng_sim.integers(0, self.q))
+        z_fake   = _sample_short(self.m, self.beta, rng_sim)
+        # w_fake = A·z_fake - c_fake·T[other]  (mod q)
+        w_fake   = (self.A @ z_fake - c_fake * T[other]) % self.q
+
+        # ---- Real branch announcement for index `b` -------------------
+        rng_real = _rng_from(shake256(ctx + b":or_real" + r_bit.tobytes(), 32))
+        rho      = _sample_short(self.m, self.beta, rng_real)
+        w_real   = (self.A @ rho) % self.q
+
+        # ---- Fiat-Shamir on both announcements -----------------------
+        w_arr: list = [None, None]
+        w_arr[b]     = w_real
+        w_arr[other] = w_fake
+        fs_input = (
+            w_arr[0].tobytes() + w_arr[1].tobytes()
+            + T[0].tobytes()   + T[1].tobytes()
+            + ctx
+        )
+        c_total = _fiat_shamir(fs_input, self.q)
+
+        # Real challenge: split so that c_b + c_fake ≡ c_total (mod q)
+        c_real = int((c_total - c_fake) % self.q)
+        z_real = (rho + c_real * r_bit) % self.q
+
+        # ---- Arrange output in canonical branch order [0, 1] ---------
+        c_out: list = [None, None]
+        z_out: list = [None, None]
+        c_out[b]     = c_real
+        c_out[other] = c_fake
+        z_out[b]     = z_real.tolist()
+        z_out[other] = z_fake.tolist()
+
         return {
-            "sigma":          sigma,
-            "sim_commitment": C_sim.tolist(),
-            "sim_challenge":  int(e_sim),
+            "w": [w_arr[0].tolist(), w_arr[1].tolist()],
+            "c": [int(c_out[0]),     int(c_out[1])],
+            "z": [z_out[0],          z_out[1]],
         }
 
     def _verify_bit(self, proof: dict, C_bit: np.ndarray, ctx: bytes) -> bool:
-        return self._sigma_verify(proof["sigma"], C_bit, ctx)
+        """
+        Verify the CDS OR proof: C_bit commits to 0 OR to 1.
+
+        Checks:
+        1. (c_0 + c_1) ≡ FS(w_0 ‖ w_1 ‖ T_0 ‖ T_1 ‖ ctx)  (mod q)
+        2. A·z_0 ≡ w_0 + c_0·T_0  (mod q)
+        3. A·z_1 ≡ w_1 + c_1·T_1  (mod q)
+        """
+        try:
+            w0 = np.asarray(proof["w"][0], dtype=np.int64)
+            w1 = np.asarray(proof["w"][1], dtype=np.int64)
+            c0 = int(proof["c"][0])
+            c1 = int(proof["c"][1])
+            z0 = np.asarray(proof["z"][0], dtype=np.int64)
+            z1 = np.asarray(proof["z"][1], dtype=np.int64)
+
+            # Adjusted targets
+            T0 = C_bit.copy()
+            T1 = (C_bit - self.e0) % self.q
+
+            # 1. Challenge consistency
+            fs_input = (
+                w0.tobytes() + w1.tobytes()
+                + T0.tobytes() + T1.tobytes()
+                + ctx
+            )
+            c_total = _fiat_shamir(fs_input, self.q)
+            if (c0 + c1) % self.q != c_total:
+                return False
+
+            # 2. Branch 0: A·z0 ≡ w0 + c0·T0  (mod q)
+            lhs0 = (self.A @ z0) % self.q
+            rhs0 = (w0 + c0 * T0) % self.q
+            if not np.all(lhs0 == rhs0):
+                return False
+
+            # 3. Branch 1: A·z1 ≡ w1 + c1·T1  (mod q)
+            lhs1 = (self.A @ z1) % self.q
+            rhs1 = (w1 + c1 * T1) % self.q
+            if not np.all(lhs1 == rhs1):
+                return False
+
+            return True
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Public API — generate proof

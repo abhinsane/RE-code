@@ -337,10 +337,7 @@ class ElectionAuthority:
 
         # Cross-check: any voter still holding bio_authenticated=True at
         # finalization time never had their vote accepted — report them.
-        nullified = [
-            vid for vid, reg in self._registry._records.items()
-            if reg.bio_authenticated
-        ]
+        nullified = self._registry.authenticated_not_voted()
         if nullified:
             print(
                 f"[Authority] WARNING: {len(nullified)} voter(s) passed biometric "
