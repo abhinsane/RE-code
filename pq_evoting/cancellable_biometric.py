@@ -36,7 +36,7 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .config import BIO_FEATURE_DIM, BIO_KEYPOINTS, BIO_MATCH_THRESHOLD
+from .config import BIO_FEATURE_DIM, BIO_MATCH_THRESHOLD
 from .pq_crypto import pq_encrypt, pq_decrypt, shake256
 
 # ---------------------------------------------------------------------------
@@ -57,26 +57,41 @@ class CancellableBiometric:
     """
     Cancellable biometric processor for SOCOFing fingerprint images.
 
+    Feature pipeline: multi-scale Gabor enhancement → HOG descriptor.
+
+    Gabor (48 filters: 3 scales × 16 orientations) captures the ridge
+    orientation field at fine angular resolution. HOG on the Gabor-enhanced
+    image encodes that field as a compact, region-wise histogram — the same
+    information real AFIS systems use for identification.
+
     Parameters
     ----------
     feature_dim : int
         Output dimension of the BioHash (number of projected bits).
-    num_keypoints : int
-        Number of ORB keypoints to extract per image.
     """
 
-    # ORB descriptor width is always 32 bytes = 256 bits
-    _DESC_BYTES: int = 32
+    # HOG descriptor dimension for a 256×256 image with:
+    #   blockSize=(32,32), blockStride=(16,16), cellSize=(16,16), nbins=9
+    #   blocks = ((256-32)/16 + 1)² = 15² = 225
+    #   values per block = 2×2 cells × 9 bins = 36
+    #   HOG dim = 225 × 36 = 8100
+    _HOG_DIM: int = 8100
+    _IMG_SIZE: int = 256  # resize target for both width and height
 
-    def __init__(
-        self,
-        feature_dim: int  = BIO_FEATURE_DIM,
-        num_keypoints: int = BIO_KEYPOINTS,
-    ) -> None:
-        self.feature_dim   = feature_dim
-        self.num_keypoints = num_keypoints
-        self._raw_dim      = num_keypoints * self._DESC_BYTES  # flat ORB vector
-        self._orb          = cv2.ORB_create(nfeatures=num_keypoints)
+    # Gabor bank: 3 wavelengths (fine/medium/coarse ridge spacing) × 16 angles
+    _GABOR_LAMBDAS: Tuple[float, ...] = (6.0, 9.0, 12.0)
+    _GABOR_ANGLES:  int = 16
+
+    def __init__(self, feature_dim: int = BIO_FEATURE_DIM) -> None:
+        self.feature_dim = feature_dim
+        self._raw_dim    = self._HOG_DIM   # feature vector = HOG only
+        self._hog = cv2.HOGDescriptor(
+            _winSize=(self._IMG_SIZE, self._IMG_SIZE),
+            _blockSize=(32, 32),
+            _blockStride=(16, 16),
+            _cellSize=(16, 16),
+            _nbins=9,
+        )
 
     # ------------------------------------------------------------------
     # Feature extraction
@@ -85,54 +100,66 @@ class CancellableBiometric:
     def extract_features(self, image_path: str) -> np.ndarray:
         """
         Extract a normalised, fixed-size float32 feature vector from a
-        fingerprint image.
+        fingerprint image using the Gabor + HOG pipeline.
 
         Steps
         -----
-        1. Load as grayscale and resize to 96×96.
-        2. Apply CLAHE for contrast enhancement.
-        3. Extract up to *num_keypoints* ORB keypoints; fall back to HOG
-           gradient histogram if keypoint count is too low.
-        4. Flatten, pad/truncate to *_raw_dim*, and L2-normalise.
+        1. Load as grayscale and resize to 256×256.
+        2. CLAHE for local ridge contrast enhancement.
+        3. Multi-scale Gabor bank (48 filters: 3 λ × 16 θ) — enhances ridges
+           at fine/medium/coarse spacing across all orientations.
+        4. HOG on the Gabor-enhanced image — encodes the ridge orientation
+           field as cell-wise histograms (the same representation used in AFIS).
+        5. L2-normalise → fixed-dim feature vector.
         """
         img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError(f"Cannot load fingerprint image: {image_path}")
 
-        img = cv2.resize(img, (96, 96))
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img = cv2.resize(img, (self._IMG_SIZE, self._IMG_SIZE))
+
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         img   = clahe.apply(img)
 
-        keypoints, descriptors = self._orb.detectAndCompute(img, None)
-
-        if descriptors is not None and len(descriptors) >= 8:
-            desc = descriptors.astype(np.float32)
-            # Pad / truncate to num_keypoints rows
-            if len(desc) < self.num_keypoints:
-                pad  = np.zeros(
-                    (self.num_keypoints - len(desc), self._DESC_BYTES),
-                    dtype=np.float32,
-                )
-                desc = np.vstack([desc, pad])
-            else:
-                desc = desc[: self.num_keypoints]
-            feature = desc.flatten()
-        else:
-            feature = self._hog_fallback(img)
+        img     = self._gabor_enhance(img)
+        feature = self._compute_hog(img)
 
         norm = np.linalg.norm(feature)
         return feature / norm if norm > 1e-9 else feature
 
-    def _hog_fallback(self, img: np.ndarray) -> np.ndarray:
-        """HOG-style gradient histogram (fallback when ORB yields <8 kps)."""
-        gx  = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
-        gy  = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
-        _, angle = cv2.cartToPolar(gx, gy, angleInDegrees=True)
-        bins = self.num_keypoints * self._DESC_BYTES
-        hist, _ = np.histogram(angle.flatten(), bins=bins, range=(0.0, 360.0))
-        feature = hist.astype(np.float32)
-        norm    = np.linalg.norm(feature)
-        return feature / norm if norm > 1e-9 else feature
+    def _gabor_enhance(self, img: np.ndarray) -> np.ndarray:
+        """
+        Multi-scale Gabor filter bank: 3 wavelengths × 16 orientations.
+
+        Three wavelengths cover ridge spacings of 6, 9, and 12 px —
+        matching fine, typical, and coarse SOCOFing fingerprint ridges.
+        Sixteen orientations (0°–168.75° in 11.25° steps) give much finer
+        angular resolution than the previous 8-orientation bank.
+
+        The per-pixel maximum across all 48 filters is taken so that each
+        pixel reflects the strongest ridge response at any scale/orientation.
+        """
+        enhanced = np.zeros(img.shape, dtype=np.float32)
+        src      = img.astype(np.float32)
+        for lambd in self._GABOR_LAMBDAS:
+            for theta in np.linspace(0, np.pi, self._GABOR_ANGLES, endpoint=False):
+                kernel   = cv2.getGaborKernel(
+                    (17, 17), sigma=3.5, theta=theta,
+                    lambd=lambd, gamma=0.5, psi=0, ktype=cv2.CV_32F,
+                )
+                filtered = cv2.filter2D(src, cv2.CV_32F, kernel)
+                np.maximum(enhanced, filtered, out=enhanced)
+        cv2.normalize(enhanced, enhanced, 0, 255, cv2.NORM_MINMAX)
+        return enhanced.astype(np.uint8)
+
+    def _compute_hog(self, img: np.ndarray) -> np.ndarray:
+        """Compute HOG descriptor and return a normalised float32 vector."""
+        feat = self._hog.compute(img)
+        if feat is None:
+            return np.zeros(self._HOG_DIM, dtype=np.float32)
+        feat = feat.flatten().astype(np.float32)
+        norm = np.linalg.norm(feat)
+        return feat / norm if norm > 1e-9 else feat
 
     # ------------------------------------------------------------------
     # BioHashing

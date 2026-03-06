@@ -40,9 +40,9 @@ ZKP_BETA    = 800              # ∞-norm bound for short randomness vectors
 # ---------------------------------------------------------------------------
 # Cancellable biometric parameters
 # ---------------------------------------------------------------------------
-BIO_FEATURE_DIM     = 256    # Output dimension after BioHash projection
-BIO_KEYPOINTS       = 128    # ORB keypoints to extract per fingerprint
-BIO_MATCH_THRESHOLD = 0.70   # Hamming-similarity threshold for accept/reject
+BIO_FEATURE_DIM     = 512    # Output dimension after BioHash projection
+BIO_KEYPOINTS       = 256    # ORB keypoints to extract per fingerprint
+BIO_MATCH_THRESHOLD = 0.80   # Hamming-similarity threshold for accept/reject
 
 # ---------------------------------------------------------------------------
 # Blockchain parameters
