@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .config import AUTH_SESSION_TIMEOUT
+from .config import AUTH_SESSION_TIMEOUT, BIO_LOCKOUT_SECONDS, BIO_MAX_AUTH_ATTEMPTS
 from .pq_crypto import sha3_256
 
 
@@ -51,6 +51,8 @@ class VoterRegistration:
     has_voted:          bool          = False
     bio_authenticated:  bool          = False   # set to True only after biometric passes
     bio_auth_time:      Optional[float] = None  # unix timestamp of last successful auth
+    bio_fail_count:     int           = 0       # consecutive failed biometric attempts
+    bio_locked_until:   Optional[float] = None  # lockout expiry (unix timestamp)
 
     def __post_init__(self) -> None:
         if not self.voter_id_hash:
@@ -98,6 +100,49 @@ class VoterRegistry:
 
     def get(self, voter_id: str) -> Optional[VoterRegistration]:
         return self._records.get(voter_id)
+
+    # ------------------------------------------------------------------
+    # Brute-force lockout
+    # ------------------------------------------------------------------
+
+    def record_failed_auth(self, voter_id: str) -> bool:
+        """
+        Increment the consecutive-failure counter for voter_id.
+
+        After BIO_MAX_AUTH_ATTEMPTS failures the account is locked for
+        BIO_LOCKOUT_SECONDS.  Returns True if the account is now locked.
+        """
+        reg = self._records.get(voter_id)
+        if reg is None:
+            return False
+        reg.bio_fail_count += 1
+        if reg.bio_fail_count >= BIO_MAX_AUTH_ATTEMPTS:
+            reg.bio_locked_until = time.time() + BIO_LOCKOUT_SECONDS
+        return reg.bio_locked_until is not None and time.time() < reg.bio_locked_until
+
+    def is_auth_locked(self, voter_id: str) -> bool:
+        """
+        Return True iff the voter is currently locked out of authentication.
+
+        Expired locks are cleared automatically on the first check after
+        they expire (avoids needing a background cleanup task).
+        """
+        reg = self._records.get(voter_id)
+        if reg is None or reg.bio_locked_until is None:
+            return False
+        if time.time() >= reg.bio_locked_until:
+            # Lock has expired — auto-clear
+            reg.bio_fail_count   = 0
+            reg.bio_locked_until = None
+            return False
+        return True
+
+    def reset_auth_attempts(self, voter_id: str) -> None:
+        """Reset the failure counter and any lockout after a successful auth."""
+        reg = self._records.get(voter_id)
+        if reg:
+            reg.bio_fail_count   = 0
+            reg.bio_locked_until = None
 
     def mark_authenticated(self, voter_id: str) -> bool:
         """

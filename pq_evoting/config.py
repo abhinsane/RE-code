@@ -59,6 +59,15 @@ BLOCKCHAIN_DIFFICULTY = 2    # PoW leading-zero count (increase for production)
 AUTH_SESSION_TIMEOUT = 600   # 10 minutes
 
 # ---------------------------------------------------------------------------
+# Biometric brute-force lockout
+# ---------------------------------------------------------------------------
+# After BIO_MAX_AUTH_ATTEMPTS consecutive failed biometric checks the voter
+# account is locked for BIO_LOCKOUT_SECONDS.  The counter resets on any
+# successful verification.
+BIO_MAX_AUTH_ATTEMPTS = 5     # consecutive failures before lockout
+BIO_LOCKOUT_SECONDS   = 300   # 5-minute lockout window
+
+# ---------------------------------------------------------------------------
 # Election domain separator (embedded in every hash / ZKP challenge)
 # ---------------------------------------------------------------------------
 ELECTION_DOMAIN = b"pq_evoting_2024_domain_sep"

@@ -192,16 +192,39 @@ class ElectionAuthority:
             print(f"[Authority] Voter {voter_id[:8]}… already voted — rejected.")
             return False, 0.0
 
+        # Brute-force lockout check
+        if self._registry.is_auth_locked(voter_id):
+            import time as _time
+            remaining = int(reg.bio_locked_until - _time.time()) if reg.bio_locked_until else 0
+            print(
+                f"[Authority] Voter {voter_id[:8]}… is locked out "
+                f"({remaining}s remaining).  Too many failed attempts."
+            )
+            return False, 0.0
+
         ok, score = self._bio.verify(
             fingerprint_path, user_token,
             self._kp.kem_sk, reg.biometric_data,
         )
         if ok:
-            # Record biometric clearance — receive_vote() checks this flag
-            self._registry.mark_authenticated(voter_id)
+            self._registry.reset_auth_attempts(voter_id)   # clear failure counter
+            self._registry.mark_authenticated(voter_id)    # grant session token
             print(f"[Authority] Biometric PASSED for {voter_id[:8]}… (score={score:.3f})")
         else:
-            print(f"[Authority] Biometric FAILED for {voter_id[:8]}… (score={score:.3f})")
+            locked = self._registry.record_failed_auth(voter_id)
+            if locked:
+                print(
+                    f"[Authority] Biometric FAILED for {voter_id[:8]}… "
+                    f"(score={score:.3f}) — account LOCKED after too many failures."
+                )
+            else:
+                rec  = self._registry.get(voter_id)
+                from .config import BIO_MAX_AUTH_ATTEMPTS as _MAX
+                left = max(0, _MAX - (rec.bio_fail_count if rec else 0))
+                print(
+                    f"[Authority] Biometric FAILED for {voter_id[:8]}… "
+                    f"(score={score:.3f}, {left} attempt(s) remaining before lockout)"
+                )
         return ok, score
 
     # ------------------------------------------------------------------
