@@ -216,7 +216,7 @@ with tab_setup:
                 )
                 raw_candidates = st.text_area(
                     "Candidates (one per line)",
-                    value="Alice\nBob\nCarol",
+                    value="Modi\nRahul\nKejriwal\nMamta",
                     height=120,
                 )
                 st.divider()
@@ -475,7 +475,7 @@ with tab_vote:
                 voter_ids     = list(S.voters.keys())
                 eligible_ids  = [
                     vid for vid in voter_ids
-                    if not S.authority._registry.get(vid, None) or
+                    if not S.authority._registry.get(vid) or
                        not S.authority._registry.get(vid).has_voted
                 ]
                 selected_voter = st.selectbox(
