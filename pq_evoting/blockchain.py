@@ -339,6 +339,12 @@ class VotingBlockchain:
                 return False
             if not cur.verify_signature(self._pk):
                 return False
+            # Re-derive Merkle root from the actual vote records and compare
+            # to the stored value.  compute_hash() uses the stored merkle_root
+            # string verbatim, so without this check an adversary can replace
+            # vote records within a block while leaving the block hash intact.
+            if cur.merkle_root != cur.compute_merkle_root():
+                return False
 
         return True
 

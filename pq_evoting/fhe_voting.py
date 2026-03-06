@@ -55,6 +55,7 @@ class FHEAuthority:
 
     def __init__(self, num_candidates: int) -> None:
         self.num_candidates = num_candidates
+        self._election_sealed = False  # set to True by seal() after polls close
 
         # Full context with secret key (kept by the authority)
         self._ctx = ts.context(
@@ -106,11 +107,34 @@ class FHEAuthority:
         plaintext = enc_vec.decrypt()
         return [int(plaintext[i]) for i in range(self.num_candidates)]
 
+    def seal(self) -> None:
+        """
+        Mark the election as sealed (polls closed).
+
+        Must be called by ElectionAuthority.finalize() before any individual
+        ballot decryption is performed.  This ensures decrypt_single_vote()
+        cannot be called while voting is still in progress.
+        """
+        self._election_sealed = True
+
     def decrypt_single_vote(self, encrypted_vote_bytes: bytes) -> int:
         """
         Decrypt a single encrypted vote and return the candidate index.
-        Intended for audit / testing purposes only.
+
+        AUDIT / POST-ELECTION USE ONLY.  Calling this while the election is
+        still active would reveal individual votes, breaking vote secrecy.
+        The method is guarded by a seal check: ElectionAuthority.finalize()
+        must call seal() before any individual decryption is allowed.
+
+        Returns the candidate index (0-based), or -1 for a malformed ballot.
         """
+        if not self._election_sealed:
+            raise RuntimeError(
+                "decrypt_single_vote() may only be called after the election "
+                "is sealed (polls closed).  Call ElectionAuthority.finalize() "
+                "first.  Calling this during an active election would reveal "
+                "individual votes and break vote secrecy."
+            )
         ctx       = ts.context_from(self._full_ctx_bytes)
         enc_vec   = ts.bfv_vector_from(ctx, encrypted_vote_bytes)
         plaintext = enc_vec.decrypt()

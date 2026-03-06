@@ -604,10 +604,13 @@ with tab_vote:
                                     accepted = S.authority.receive_vote(ballot)
 
                                     if accepted:
+                                        # Nullifier matches blockchain.py: SHA3(voter_id_hash)
+                                        # Previously included sig_pk, which was inconsistent
+                                        # with the on-chain nullifier after the blockchain fix.
                                         nullifier_b = sha3_256(
                                             bytes.fromhex(
                                                 ballot["zkp_proof"]["voter_id_hash"]
-                                            ) + S.voters[ar["voter_id"]].sig_pk
+                                            )
                                         )
                                         enc_hash_b = sha3_256(
                                             bytes.fromhex(ballot["encrypted_vote_hex"])

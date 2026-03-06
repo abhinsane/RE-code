@@ -50,6 +50,15 @@ BIO_MATCH_THRESHOLD = 0.80   # Hamming-similarity threshold for accept/reject
 BLOCKCHAIN_DIFFICULTY = 2    # PoW leading-zero count (increase for production)
 
 # ---------------------------------------------------------------------------
+# Authentication session timeout
+# ---------------------------------------------------------------------------
+# A biometric authentication token is valid for this many seconds.
+# After this window the voter must re-authenticate before casting their vote.
+# Without a timeout, an authentication from the start of polling day would
+# remain valid indefinitely, even if the voter walked away.
+AUTH_SESSION_TIMEOUT = 600   # 10 minutes
+
+# ---------------------------------------------------------------------------
 # Election domain separator (embedded in every hash / ZKP challenge)
 # ---------------------------------------------------------------------------
 ELECTION_DOMAIN = b"pq_evoting_2024_domain_sep"
