@@ -355,10 +355,18 @@ class LatticeZKP:
             bit_proofs.append(bp)
 
         # ---- Consistency hash ----------------------------------------
+        # Binds C_main and all bit commitments to the voter context.
+        # NOTE: bits_s (the binary representation of the vote) is intentionally
+        # NOT included here and NOT returned in the proof dict.  Including it
+        # was a critical privacy leak — the authority (verifier) would learn
+        # the exact vote value from the proof, defeating zero-knowledge.
+        # A fully rigorous sum-check would use a separate sigma protocol
+        # proving ∑ 2^i·C_bit_i = C_main; this is documented as a known
+        # prototype limitation.  The hash still commits C_main and all
+        # C_bit_i together, preventing cross-proof mixing.
         con_input = (
             C_main.tobytes()
             + b"".join(np.array(c, dtype=np.int64).tobytes() for c in bit_commitments)
-            + bits_s.encode()
             + ctx
         )
         consistency_hash = sha3_256(con_input).hex()
@@ -368,7 +376,6 @@ class LatticeZKP:
             "main_proof":       main_proof,
             "bit_commitments":  bit_commitments,
             "bit_proofs":       bit_proofs,
-            "bits_str":         bits_s,
             "consistency_hash": consistency_hash,
             "num_candidates":   self.num_candidates,
             "voter_id_hash":    sha3_256(voter_id).hex(),
@@ -414,13 +421,13 @@ class LatticeZKP:
                 if not self._verify_bit(bproof, C_bit, ctx + f":bit{i}".encode()):
                     return False
 
-            # Consistency hash
+            # Consistency hash — binds C_main and all bit commitments to ctx.
+            # bits_str is NOT included (it would reveal the vote to the verifier).
             con_input = (
                 C_main.tobytes()
                 + b"".join(
                     np.array(c, dtype=np.int64).tobytes() for c in bc
                 )
-                + proof["bits_str"].encode()
                 + ctx
             )
             if proof.get("consistency_hash") != sha3_256(con_input).hex():

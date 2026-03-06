@@ -203,7 +203,12 @@ class FHETally:
 
     def __init__(self, authority: FHEAuthority) -> None:
         self._authority       = authority
-        self._ctx             = ts.context_from(authority.full_context_bytes())
+        # Homomorphic addition (BFV) requires only the public context.
+        # Previously used full_context_bytes() which embeds the secret key
+        # in the tally object — unnecessary for accumulation and a needless
+        # exposure of key material.  Decryption is delegated to authority
+        # via decrypt_tally(), which loads the full context only then.
+        self._ctx             = ts.context_from(authority.public_context_bytes())
         self._tally: Optional[ts.BFVVector] = None
         self._vote_count: int = 0
 
