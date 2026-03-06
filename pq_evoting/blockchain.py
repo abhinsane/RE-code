@@ -60,13 +60,22 @@ class VoteRecord:
     timestamp:        float = field(default_factory=time.time)
 
     def serialise(self) -> bytes:
-        """Canonical byte representation for hashing."""
+        """Canonical byte representation for Merkle hashing.
+
+        Previously the signature and voter_sig_pk fields were excluded, so an
+        adversary who could mutate the stored blockchain data could swap out
+        the voter's public key and signature in any VoteRecord without
+        affecting the Merkle root or block hash.  Including them makes every
+        field of every vote record committed by the block's Merkle root.
+        """
         return json.dumps(
             {
                 "voter_id_hash":  self.voter_id_hash,
                 "encrypted_vote": self.encrypted_vote,
                 "zkp_commitment": self.zkp_commitment,
                 "zkp_proof_hash": self.zkp_proof_hash,
+                "signature":      self.signature,
+                "voter_sig_pk":   self.voter_sig_pk,
                 "timestamp":      self.timestamp,
             },
             sort_keys=True,
@@ -245,9 +254,13 @@ class VotingBlockchain:
         Returns False (and discards the record) if the nullifier is already
         present (double-vote attempt).
         """
-        nullifier = sha3_256(
-            bytes.fromhex(record.voter_id_hash) + record.voter_sig_pk.encode()
-        ).hex()
+        # Nullifier is based only on voter_id_hash.
+        # Previously voter_sig_pk was included, allowing a voter who somehow
+        # obtained a second registration with a different key pair to cast a
+        # second vote (different nullifier despite same voter identity).
+        # The voter_id is the authoritative unique identity; keying the
+        # nullifier on it alone closes this gap.
+        nullifier = sha3_256(bytes.fromhex(record.voter_id_hash)).hex()
 
         if nullifier in self._nullifiers:
             return False
@@ -292,12 +305,28 @@ class VotingBlockchain:
         """
         Full chain integrity check.
 
-        Verifies for every non-genesis block:
-        * prev_hash correctly references predecessor's hash
+        Verifies the genesis block and for every subsequent block:
         * stored hash matches recomputed hash
-        * PoW target is satisfied
+        * PoW target (leading zeros) is satisfied
         * ML-DSA-65 authority signature is valid
+        * prev_hash correctly references the predecessor's hash
+
+        Previously the genesis block (index 0) was never verified, allowing
+        an adversary to silently replace it (different initial state, forged
+        prev_hash of "0"*64, etc.) without failing the integrity check.
         """
+        if not self.chain:
+            return True
+
+        # Verify genesis block
+        genesis = self.chain[0]
+        if genesis.hash != genesis.compute_hash():
+            return False
+        if not genesis.hash.startswith("0" * genesis.difficulty):
+            return False
+        if not genesis.verify_signature(self._pk):
+            return False
+
         for i in range(1, len(self.chain)):
             cur  = self.chain[i]
             prev = self.chain[i - 1]
