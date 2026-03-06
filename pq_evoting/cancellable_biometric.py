@@ -68,6 +68,14 @@ class CancellableBiometric:
     # ORB descriptor width is always 32 bytes = 256 bits
     _DESC_BYTES: int = 32
 
+    # HOG descriptor dimension for a 256×256 image with:
+    #   blockSize=(32,32), blockStride=(16,16), cellSize=(16,16), nbins=9
+    #   blocks = ((256-32)/16 + 1)² = 15² = 225
+    #   values per block = 2×2 cells × 9 bins = 36
+    #   HOG dim = 225 × 36 = 8100
+    _HOG_DIM: int = 8100
+    _IMG_SIZE: int = 256   # resize target for both width and height
+
     def __init__(
         self,
         feature_dim: int  = BIO_FEATURE_DIM,
@@ -75,8 +83,21 @@ class CancellableBiometric:
     ) -> None:
         self.feature_dim   = feature_dim
         self.num_keypoints = num_keypoints
-        self._raw_dim      = num_keypoints * self._DESC_BYTES  # flat ORB vector
-        self._orb          = cv2.ORB_create(nfeatures=num_keypoints)
+        self._orb_dim      = num_keypoints * self._DESC_BYTES
+        self._raw_dim      = self._HOG_DIM + self._orb_dim   # HOG + ORB concat
+        self._orb          = cv2.ORB_create(
+            nfeatures=num_keypoints,
+            scaleFactor=1.2,
+            nlevels=8,
+            fastThreshold=10,
+        )
+        self._hog = cv2.HOGDescriptor(
+            _winSize=(self._IMG_SIZE, self._IMG_SIZE),
+            _blockSize=(32, 32),
+            _blockStride=(16, 16),
+            _cellSize=(16, 16),
+            _nbins=9,
+        )
 
     # ------------------------------------------------------------------
     # Feature extraction
@@ -89,25 +110,33 @@ class CancellableBiometric:
 
         Steps
         -----
-        1. Load as grayscale and resize to 96×96.
-        2. Apply CLAHE for contrast enhancement.
-        3. Extract up to *num_keypoints* ORB keypoints; fall back to HOG
-           gradient histogram if keypoint count is too low.
-        4. Flatten, pad/truncate to *_raw_dim*, and L2-normalise.
+        1. Load as grayscale and resize to 256×256 (larger → more stable kps).
+        2. Apply CLAHE for ridge contrast enhancement.
+        3. Apply Gabor filter bank (8 orientations) to enhance ridge structure.
+        4. Compute HOG descriptor (8 100-dim; captures global ridge orientation).
+        5. Extract ORB keypoints/descriptors (captures local minutiae-like details).
+        6. Concatenate HOG + ORB → L2-normalise → fixed-dim feature vector.
         """
         img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise ValueError(f"Cannot load fingerprint image: {image_path}")
 
-        img = cv2.resize(img, (96, 96))
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img = cv2.resize(img, (self._IMG_SIZE, self._IMG_SIZE))
+
+        # CLAHE — tighter tile grid on larger image for local ridge contrast
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         img   = clahe.apply(img)
 
-        keypoints, descriptors = self._orb.detectAndCompute(img, None)
+        # Gabor ridge enhancement
+        img = self._gabor_enhance(img)
 
+        # HOG features (primary — highly individual for ridge orientation maps)
+        hog_feat = self._compute_hog(img)
+
+        # ORB features (secondary — local keypoint descriptors)
+        keypoints, descriptors = self._orb.detectAndCompute(img, None)
         if descriptors is not None and len(descriptors) >= 8:
             desc = descriptors.astype(np.float32)
-            # Pad / truncate to num_keypoints rows
             if len(desc) < self.num_keypoints:
                 pad  = np.zeros(
                     (self.num_keypoints - len(desc), self._DESC_BYTES),
@@ -116,23 +145,43 @@ class CancellableBiometric:
                 desc = np.vstack([desc, pad])
             else:
                 desc = desc[: self.num_keypoints]
-            feature = desc.flatten()
+            orb_feat = desc.flatten()
         else:
-            feature = self._hog_fallback(img)
+            orb_feat = np.zeros(self._orb_dim, dtype=np.float32)
 
-        norm = np.linalg.norm(feature)
-        return feature / norm if norm > 1e-9 else feature
-
-    def _hog_fallback(self, img: np.ndarray) -> np.ndarray:
-        """HOG-style gradient histogram (fallback when ORB yields <8 kps)."""
-        gx  = cv2.Sobel(img, cv2.CV_32F, 1, 0, ksize=3)
-        gy  = cv2.Sobel(img, cv2.CV_32F, 0, 1, ksize=3)
-        _, angle = cv2.cartToPolar(gx, gy, angleInDegrees=True)
-        bins = self.num_keypoints * self._DESC_BYTES
-        hist, _ = np.histogram(angle.flatten(), bins=bins, range=(0.0, 360.0))
-        feature = hist.astype(np.float32)
+        # Concatenate and L2-normalise
+        feature = np.concatenate([hog_feat, orb_feat]).astype(np.float32)
         norm    = np.linalg.norm(feature)
         return feature / norm if norm > 1e-9 else feature
+
+    def _gabor_enhance(self, img: np.ndarray) -> np.ndarray:
+        """
+        Apply a Gabor filter bank at 8 orientations and take the per-pixel
+        maximum response to enhance fingerprint ridge structure.
+
+        Parameters tuned for SOCOFing-style fingerprints (inter-ridge spacing
+        ~8–12 px at 256×256 resolution).
+        """
+        enhanced = np.zeros(img.shape, dtype=np.float32)
+        for theta in np.linspace(0, np.pi, 8, endpoint=False):
+            kernel   = cv2.getGaborKernel(
+                (15, 15), sigma=3.0, theta=theta,
+                lambd=9.0, gamma=0.8, psi=0, ktype=cv2.CV_32F,
+            )
+            filtered = cv2.filter2D(img.astype(np.float32), cv2.CV_32F, kernel)
+            np.maximum(enhanced, filtered, out=enhanced)
+        # Normalise to [0, 255] uint8 so HOG / ORB work as expected
+        cv2.normalize(enhanced, enhanced, 0, 255, cv2.NORM_MINMAX)
+        return enhanced.astype(np.uint8)
+
+    def _compute_hog(self, img: np.ndarray) -> np.ndarray:
+        """Compute HOG descriptor and return a normalised float32 vector."""
+        feat = self._hog.compute(img)
+        if feat is None:
+            return np.zeros(self._HOG_DIM, dtype=np.float32)
+        feat = feat.flatten().astype(np.float32)
+        norm = np.linalg.norm(feat)
+        return feat / norm if norm > 1e-9 else feat
 
     # ------------------------------------------------------------------
     # BioHashing
