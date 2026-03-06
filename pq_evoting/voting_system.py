@@ -196,6 +196,12 @@ class ElectionAuthority:
             fingerprint_path, user_token,
             self._kp.kem_sk, reg.biometric_data,
         )
+        if ok:
+            # Record biometric clearance — receive_vote() checks this flag
+            self._registry.mark_authenticated(voter_id)
+            print(f"[Authority] Biometric PASSED for {voter_id[:8]}… (score={score:.3f})")
+        else:
+            print(f"[Authority] Biometric FAILED for {voter_id[:8]}… (score={score:.3f})")
         return ok, score
 
     # ------------------------------------------------------------------
@@ -223,6 +229,17 @@ class ElectionAuthority:
         # ---- Eligibility -------------------------------------------------
         if reg is None or not reg.is_active or reg.has_voted:
             print(f"[Authority] Vote rejected — voter ineligible: {voter_id[:8]}…")
+            return False
+
+        # ---- Biometric authentication gate --------------------------------
+        # The voter MUST have passed biometric verification (via authenticate())
+        # in this session before their ballot is accepted.  This check ensures
+        # that no vote can be counted without a successful biometric match,
+        # even if the ballot was crafted and submitted directly.
+        if not self._registry.is_authenticated(voter_id):
+            print(
+                f"[Authority] Vote NULLIFIED — biometric not verified: {voter_id[:8]}…"
+            )
             return False
 
         # ---- ML-DSA-65 signature -----------------------------------------
@@ -265,6 +282,7 @@ class ElectionAuthority:
 
         # ---- Mark voter --------------------------------------------------
         self._registry.mark_voted(voter_id)
+        self._registry.clear_authentication(voter_id)   # one-time use auth token
         print(f"[Authority] Vote accepted and recorded. Voter: {voter_id[:8]}…")
         return True
 
@@ -317,15 +335,31 @@ class ElectionAuthority:
         winner_idx  = max(counts, key=lambda k: counts[k])
         winner_name = self.config.candidates[winner_idx]
 
+        # Cross-check: any voter still holding bio_authenticated=True at
+        # finalization time never had their vote accepted — report them.
+        nullified = [
+            vid for vid, reg in self._registry._records.items()
+            if reg.bio_authenticated
+        ]
+        if nullified:
+            print(
+                f"[Authority] WARNING: {len(nullified)} voter(s) passed biometric "
+                f"but no vote was recorded — auth tokens cleared: "
+                + ", ".join(v[:8] + "…" for v in nullified)
+            )
+        for vid in nullified:
+            self._registry.clear_authentication(vid)
+
         result = {
-            "election_id":    self.config.election_id,
-            "candidates":     self.config.candidates,
-            "results":        results_by_name,
-            "total_votes":    total,
-            "winner":         winner_name,
-            "blockchain_ok":  chain_ok,
-            "chain_length":   len(self._chain.chain),
-            "timestamp":      time.time(),
+            "election_id":       self.config.election_id,
+            "candidates":        self.config.candidates,
+            "results":           results_by_name,
+            "total_votes":       total,
+            "winner":            winner_name,
+            "blockchain_ok":     chain_ok,
+            "chain_length":      len(self._chain.chain),
+            "nullified_count":   len(nullified),
+            "timestamp":         time.time(),
         }
 
         # Sign results
