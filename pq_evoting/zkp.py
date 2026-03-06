@@ -110,6 +110,13 @@ class LatticeZKP:
         self.m    = m
         self.beta = beta
 
+        # Number of bits needed to represent indices 0 … num_candidates-1.
+        # Use (num_candidates-1).bit_length() — NOT num_candidates.bit_length(),
+        # which over-counts by 1 for powers-of-two (e.g. 4 → 3 instead of 2).
+        # Over-counting lets an attacker prove an out-of-range index such as 4
+        # (binary 100, three valid 0/1 bits) for a 4-candidate election.
+        self.n_bits: int = max(1, (num_candidates - 1).bit_length())
+
         # Deterministic public matrix A ∈ Z_q^{n×m}
         seed = list(shake256(ELECTION_DOMAIN + b":zkp_matrix_A", 64))
         self.A: np.ndarray = np.random.default_rng(seed).integers(
@@ -339,8 +346,7 @@ class LatticeZKP:
         main_proof = self._sigma_prove(vote, r_main, C_main, ctx + b":knowledge")
 
         # ---- Binary decomposition ------------------------------------
-        n_bits = max(1, self.num_candidates.bit_length())
-        bits_s = format(vote, f"0{n_bits}b")   # MSB first
+        bits_s = format(vote, f"0{self.n_bits}b")   # MSB first
 
         bit_commitments: List[list] = []
         bit_proofs:      List[dict] = []
@@ -414,7 +420,10 @@ class LatticeZKP:
             # Bit proofs
             bc = proof.get("bit_commitments", [])
             bp = proof.get("bit_proofs", [])
-            if len(bc) != len(bp):
+            # Guard: must have exactly the expected number of bit commitments.
+            # Without this check an attacker can submit 0 bit commitments,
+            # skipping all CDS range checks while still passing the hash.
+            if len(bc) != self.n_bits or len(bp) != self.n_bits:
                 return False
             for i, (C_bit_l, bproof) in enumerate(zip(bc, bp)):
                 C_bit = np.asarray(C_bit_l, dtype=np.int64)
