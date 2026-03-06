@@ -250,6 +250,20 @@ class FHETally:
             }
 
         counts = self._authority.decrypt_tally(self._tally.serialize())
+
+        # Integrity cross-check: decrypted sum must match the number of
+        # ciphertexts added.  A mismatch indicates at least one malformed
+        # ballot slipped through (e.g. a non-binary one-hot vector) or an
+        # FHE computation error.  We raise rather than silently return a
+        # corrupt result so the caller knows the tally cannot be trusted.
+        decrypted_sum = sum(counts)
+        if decrypted_sum != self._vote_count:
+            raise RuntimeError(
+                f"FHE tally integrity failure: decrypted sum {decrypted_sum} "
+                f"!= submitted vote count {self._vote_count}.  "
+                "At least one ballot may contain a malformed plaintext."
+            )
+
         return {
             "per_candidate": {i: counts[i] for i in range(len(counts))},
             "total_votes":   self._vote_count,
