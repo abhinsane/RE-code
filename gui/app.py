@@ -428,7 +428,7 @@ with tab_reg:
                 st.info("No voters registered yet.")
             else:
                 for vid, v in S.voters.items():
-                    reg = S.authority._registry.get(vid)
+                    reg = S.authority.get_voter_reg(vid)
                     voted = reg.has_voted if reg else False
                     status = "✅ Voted" if voted else "⏳ Pending"
                     with st.expander(f"👤 {vid}  —  {status}"):
@@ -477,8 +477,8 @@ with tab_vote:
             voter_ids    = list(S.voters.keys())
             eligible_ids = [
                 vid for vid in voter_ids
-                if not S.authority._registry.get(vid) or
-                   not S.authority._registry.get(vid).has_voted
+                if not S.authority.get_voter_reg(vid) or
+                   not S.authority.get_voter_reg(vid).has_voted
             ]
 
             with st.form("auth_form"):
@@ -572,7 +572,7 @@ with tab_vote:
                         f"BioHash similarity: **{ar['score']:.3f}**"
                     )
 
-                    reg = S.authority._registry.get(ar["voter_id"])
+                    reg = S.authority.get_voter_reg(ar["voter_id"])
                     if reg and reg.has_voted:
                         st.warning(f"⚠️ Voter **{ar['voter_id']}** has already voted.")
                         S.auth_result = None
@@ -726,7 +726,7 @@ with tab_results:
                     S.chain_stats = S.authority.chain_stats()
 
                     # Anchor on Ethereum
-                    for blk in S.authority._chain.chain[1:]:
+                    for blk in S.authority.chain_blocks()[1:]:
                         S.eth_bridge.record_batch(blk.hash, len(blk.votes))
 
                     finalize_tx = S.eth_bridge.finalize_election(res_hash, sig_bytes)
@@ -887,7 +887,7 @@ with tab_chain:
             )
 
             st.divider()
-            chain = S.authority._chain.chain
+            chain = S.authority.chain_blocks()
             for blk in reversed(chain):
                 header_color = "#2a3a6a" if blk.index > 0 else "#1e3a2a"
                 with st.expander(
@@ -906,7 +906,7 @@ with tab_chain:
                         st.markdown(f"**Hash**: `{blk.hash}`")
                         st.markdown(f"**Merkle root**: `{blk.merkle_root[:32]}…`")
                         sig_ok = blk.verify_signature(
-                            S.authority._kp.sig_pk
+                            S.authority.authority_sig_pk
                         )
                         st.markdown(
                             f"**ML-DSA-65 sig**: {'✅ VALID' if sig_ok else '❌ INVALID'}"

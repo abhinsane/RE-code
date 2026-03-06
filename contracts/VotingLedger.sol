@@ -6,8 +6,10 @@ pragma solidity ^0.8.20;
  * @notice On-chain anchor for a post-quantum e-voting system.
  *
  * The contract stores NO plaintext votes.  It records:
- *   • Nullifiers  (bytes32)  – SHA3-256(voter_id_hash ‖ voter_sig_pk)
- *                              prevents double-voting on-chain.
+ *   • Nullifiers  (bytes32)  – SHA3-256(voter_id_hash)
+ *                              where voter_id_hash = SHA3-256(voter_id).
+ *                              The double-hash prevents linking the on-chain
+ *                              record to the voter; prevents double-voting.
  *   • encVoteHash (bytes32)  – SHA3-256(FHE ciphertext)   tamper evidence
  *   • zkpHash     (bytes32)  – SHA3-256(ZKP proof JSON)   public verifiability
  *   • batchMerkleRoot        – Root of each mined off-chain block's Merkle tree
@@ -36,7 +38,9 @@ contract VotingLedger {
     bool    public isOpen;
     uint256 public totalVotes;
 
-    // Nullifier registry — SHA3-256(voter_id_hash ‖ voter_sig_pk)
+    // Nullifier registry — SHA3-256(voter_id_hash)
+    // (voter_id_hash is itself SHA3-256(voter_id), so the nullifier is a
+    //  double-hash that prevents linking the on-chain record to the voter.)
     mapping(bytes32 => bool) public nullifiers;
 
     // Per-vote evidence anchored on-chain
@@ -95,7 +99,7 @@ contract VotingLedger {
 
     /**
      * @notice Anchor evidence of a single encrypted vote.
-     * @param nullifier    SHA3-256(voter_id_hash ‖ voter_sig_pk)
+     * @param nullifier    SHA3-256(voter_id_hash)  where voter_id_hash = SHA3-256(voter_id)
      * @param encVoteHash  SHA3-256(FHE BFV ciphertext bytes)
      * @param zkpHash      SHA3-256(ZKP proof JSON bytes)
      */
