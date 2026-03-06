@@ -42,6 +42,7 @@ from pq_evoting import (
     pq_verify,
     sha3_256,
 )
+from pq_evoting.config import BIO_MATCH_THRESHOLD
 from eth_integration import EthBridge
 
 # ── page config ──────────────────────────────────────────────────────────────
@@ -95,6 +96,7 @@ def _init_state() -> None:
         "voter_tokens":   {},            # voter_id -> bytes
         "voter_fps":      {},            # voter_id -> {"enrol": path, "verify": path}
         "vote_log":       [],            # list of dicts
+        "auth_result":    None,         # {"voter_id", "ok", "score"} — cleared after vote
         "results":        None,
         "chain_stats":    {},
         "finalize_tx":    None,
@@ -457,7 +459,7 @@ with tab_reg:
 
 with tab_vote:
     st.header("🗳️ Cast Your Vote")
-    st.caption("Biometric authentication → FHE encryption → Lattice ZKP → ML-DSA-65 signature.")
+    st.caption("Step 1: Biometric authentication → Step 2: Encrypted ballot (only if verified).")
 
     if S.phase == "setup":
         st.warning("⚠️ Complete the **Setup** tab first.")
@@ -469,6 +471,19 @@ with tab_vote:
         col1, col2 = st.columns([2, 3])
 
         with col1:
+ claude/post-quantum-evoting-system-W2QQV
+            # ── STEP 1: Biometric Authentication ─────────────────────────
+            st.subheader("Step 1 — Biometric Authentication")
+
+            voter_ids    = list(S.voters.keys())
+            eligible_ids = [
+                vid for vid in voter_ids
+                if not S.authority._registry.get(vid) or
+                   not S.authority._registry.get(vid).has_voted
+            ]
+
+            with st.form("auth_form"):
+=======
             st.subheader("Ballot")
 
             with st.form("vote_form"):
@@ -478,19 +493,18 @@ with tab_vote:
                     if not S.authority._registry.get(vid) or
                        not S.authority._registry.get(vid).has_voted
                 ]
+ main
                 selected_voter = st.selectbox(
                     "Select voter",
                     options=eligible_ids,
                     placeholder="Choose voter ID…",
                 )
-
                 pin_vote = st.text_input(
                     "Biometric PIN",
                     type="password",
                     value="secret123",
                     help="Must match the PIN used during registration.",
                 )
-
                 fp_vote_mode = st.radio(
                     "Fingerprint (authentication)",
                     ["Use enrolled image", "Upload new image"],
@@ -503,100 +517,147 @@ with tab_vote:
                         type=["bmp", "png", "jpg", "jpeg"],
                         key="vote_fp",
                     )
-
-                candidates = S.public_params["candidates"]
-                choice_label = st.radio(
-                    "Choose candidate",
-                    options=candidates,
-                )
-                candidate_idx = candidates.index(choice_label)
-
-                cast_btn = st.form_submit_button(
-                    "🗳️ Cast Vote", type="primary", use_container_width=True
+                auth_btn = st.form_submit_button(
+                    "🔐 Authenticate", type="primary", use_container_width=True
                 )
 
-            if cast_btn and selected_voter:
-                with st.spinner("Authenticating and casting ballot…"):
+            if auth_btn and selected_voter:
+                token = _token(selected_voter, pin_vote)
+                if fp_vote_mode == "Upload new image" and uploaded_vote_fp:
+                    verify_path = _save_upload(
+                        uploaded_vote_fp, f"verify_{selected_voter}"
+                    )
+                else:
+                    # Use the EXACT enrolled image — guarantees biometric check
+                    # tests the fingerprint, not a different synthetic variant
+                    verify_path = S.voter_fps[selected_voter]["enrol"]
+
+                with st.spinner("Running biometric verification…"):
                     try:
-                        token = _token(selected_voter, pin_vote)
-
-                        # Fingerprint path
-                        if fp_vote_mode == "Upload new image" and uploaded_vote_fp:
-                            verify_path = _save_upload(
-                                uploaded_vote_fp, f"verify_{selected_voter}"
-                            )
-                        else:
-                            verify_path = S.voter_fps[selected_voter]["verify"]
-
-                        # 1. Biometric authentication
                         ok, score = S.authority.authenticate(
                             selected_voter, verify_path, token
                         )
-
-                        if not ok:
-                            st.error(
-                                f"❌ Biometric authentication FAILED "
-                                f"(BioHash similarity={score:.3f} < threshold)"
-                            )
-                            S.vote_log.append({
-                                "voter_id": selected_voter,
-                                "candidate": choice_label,
-                                "accepted":  False,
-                                "reason":    "Biometric auth failed",
-                                "bio_score": score,
-                                "timestamp": time.time(),
-                            })
-                        else:
-                            # 2. Cast encrypted + ZKP ballot
-                            ballot   = S.voters[selected_voter].cast_vote(candidate_idx)
-                            accepted = S.authority.receive_vote(ballot)
-
-                            if accepted:
-                                # 3. Anchor on Ethereum
-                                nullifier_b = sha3_256(
-                                    bytes.fromhex(ballot["zkp_proof"]["voter_id_hash"])
-                                    + S.voters[selected_voter].sig_pk
-                                )
-                                enc_hash_b = sha3_256(
-                                    bytes.fromhex(ballot["encrypted_vote_hex"])
-                                )
-                                zkp_hash_b = sha3_256(
-                                    json.dumps(
-                                        ballot["zkp_proof"], sort_keys=True
-                                    ).encode()
-                                )
-                                tx = S.eth_bridge.anchor_vote(
-                                    nullifier_b, enc_hash_b, zkp_hash_b
-                                )
-
-                                S.vote_log.append({
-                                    "voter_id":        selected_voter,
-                                    "candidate":       choice_label,
-                                    "accepted":        True,
-                                    "bio_score":       score,
-                                    "zkp_commitment":  ballot["zkp_commitment"],
-                                    "zkp_proof_hash":  ballot["zkp_proof_hash"],
-                                    "eth_tx":          tx,
-                                    "encrypted_vote":  ballot["encrypted_vote_hex"][:64] + "…",
-                                    "timestamp":       time.time(),
-                                })
-                                st.success(
-                                    f"✅ Vote cast!  Bio score: {score:.3f}  |  "
-                                    f"Ethereum tx: `{tx[:20]}…`"
-                                )
-                            else:
-                                S.vote_log.append({
-                                    "voter_id": selected_voter,
-                                    "candidate": choice_label,
-                                    "accepted":  False,
-                                    "reason":    "Authority rejected (ZKP/sig invalid or double-vote)",
-                                    "bio_score": score,
-                                    "timestamp": time.time(),
-                                })
-                                st.error("❌ Vote rejected by authority.")
+                        S.auth_result = {
+                            "voter_id": selected_voter,
+                            "ok":       ok,
+                            "score":    score,
+                        }
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Error: {exc}")
+                        st.error(f"Authentication error: {exc}")
+
+            # ── Authentication result gate ────────────────────────────────
+            if S.auth_result is not None:
+                ar = S.auth_result
+
+                if not ar["ok"]:
+                    # ── HARD BLOCK: biometric failed ─────────────────────
+                    st.error(
+                        f"❌ **Biometric authentication FAILED**  \n"
+                        f"BioHash similarity = **{ar['score']:.3f}** "
+                        f"(required ≥ {BIO_MATCH_THRESHOLD})"
+                    )
+                    st.warning(
+                        "🚫 **Vote BLOCKED** — a valid biometric match is "
+                        "required before a ballot can be cast. "
+                        "Verify your PIN and fingerprint, then try again."
+                    )
+                    S.vote_log.append({
+                        "voter_id":  ar["voter_id"],
+                        "candidate": "—",
+                        "accepted":  False,
+                        "reason":    "Biometric auth failed",
+                        "bio_score": ar["score"],
+                        "timestamp": time.time(),
+                    })
+                    if st.button("🔄 Try Again", key="retry_auth"):
+                        S.auth_result = None
+                        st.rerun()
+
+                else:
+                    # ── Biometric PASSED: show ballot ─────────────────────
+                    st.success(
+                        f"✅ **Biometric VERIFIED** — "
+                        f"BioHash similarity: **{ar['score']:.3f}**"
+                    )
+
+                    reg = S.authority._registry.get(ar["voter_id"])
+                    if reg and reg.has_voted:
+                        st.warning(f"⚠️ Voter **{ar['voter_id']}** has already voted.")
+                        S.auth_result = None
+                    else:
+                        st.subheader("Step 2 — Cast Your Ballot")
+                        st.info(
+                            f"Casting as: **{ar['voter_id']}**  "
+                            f"| Authentication score: {ar['score']:.3f}"
+                        )
+
+                        candidates = S.public_params["candidates"]
+                        with st.form("ballot_form"):
+                            choice_label  = st.radio(
+                                "Choose candidate", options=candidates
+                            )
+                            candidate_idx = candidates.index(choice_label)
+                            cast_btn = st.form_submit_button(
+                                "🗳️ Cast Encrypted Vote",
+                                type="primary",
+                                use_container_width=True,
+                            )
+
+                        if cast_btn:
+                            with st.spinner("Encrypting vote and generating ZKP…"):
+                                try:
+                                    ballot   = S.voters[ar["voter_id"]].cast_vote(
+                                        candidate_idx
+                                    )
+                                    accepted = S.authority.receive_vote(ballot)
+
+                                    if accepted:
+                                        nullifier_b = sha3_256(
+                                            bytes.fromhex(
+                                                ballot["zkp_proof"]["voter_id_hash"]
+                                            ) + S.voters[ar["voter_id"]].sig_pk
+                                        )
+                                        enc_hash_b = sha3_256(
+                                            bytes.fromhex(ballot["encrypted_vote_hex"])
+                                        )
+                                        zkp_hash_b = sha3_256(
+                                            json.dumps(
+                                                ballot["zkp_proof"], sort_keys=True
+                                            ).encode()
+                                        )
+                                        tx = S.eth_bridge.anchor_vote(
+                                            nullifier_b, enc_hash_b, zkp_hash_b
+                                        )
+                                        S.vote_log.append({
+                                            "voter_id":       ar["voter_id"],
+                                            "candidate":      choice_label,
+                                            "accepted":       True,
+                                            "bio_score":      ar["score"],
+                                            "zkp_commitment": ballot["zkp_commitment"],
+                                            "zkp_proof_hash": ballot["zkp_proof_hash"],
+                                            "eth_tx":         tx,
+                                            "encrypted_vote": ballot["encrypted_vote_hex"][:64] + "…",
+                                            "timestamp":      time.time(),
+                                        })
+                                        st.success(
+                                            f"✅ Vote cast!  "
+                                            f"Ethereum tx: `{tx[:20]}…`"
+                                        )
+                                        S.auth_result = None   # reset for next voter
+                                        st.rerun()
+                                    else:
+                                        S.vote_log.append({
+                                            "voter_id":  ar["voter_id"],
+                                            "candidate": choice_label,
+                                            "accepted":  False,
+                                            "reason":    "Authority rejected (ZKP/sig invalid or double-vote)",
+                                            "bio_score": ar["score"],
+                                            "timestamp": time.time(),
+                                        })
+                                        st.error("❌ Vote rejected by authority.")
+                                except Exception as exc:
+                                    st.error(f"Error casting vote: {exc}")
 
         with col2:
             st.subheader("Vote Log")
@@ -719,6 +780,39 @@ with tab_results:
                 height=400,
             )
             st.plotly_chart(fig, use_container_width=True)
+
+            # ── Vote breakdown in words ───────────────────────────────────
+            st.divider()
+            st.subheader("📋 Detailed Vote Breakdown")
+
+            sorted_cands = sorted(
+                candidates, key=lambda c: counts.get(c, 0), reverse=True
+            )
+            for rank, cand in enumerate(sorted_cands, 1):
+                cnt = counts.get(cand, 0)
+                pct = cnt / total * 100 if total > 0 else 0
+                votes_word = "vote" if cnt == 1 else "votes"
+                if cand == winner:
+                    st.markdown(
+                        f"🏆 **1st place — {cand} *(Winner)* **: "
+                        f"**{cnt} {votes_word}** ({pct:.1f}% of total)"
+                    )
+                else:
+                    st.markdown(
+                        f"**#{rank} — {cand}**: "
+                        f"{cnt} {votes_word} ({pct:.1f}% of total)"
+                    )
+
+            st.markdown(f"**Total votes cast**: {total}")
+
+            if len(sorted_cands) > 1:
+                top   = counts.get(sorted_cands[0], 0)
+                runup = counts.get(sorted_cands[1], 0)
+                margin = top - runup
+                st.markdown(
+                    f"**Margin of victory**: {margin} vote{'s' if margin != 1 else ''} "
+                    f"({winner} over {sorted_cands[1]})"
+                )
 
             # ── Verification details ──────────────────────────────────────
             col1, col2 = st.columns(2)
