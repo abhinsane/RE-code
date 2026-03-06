@@ -37,6 +37,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 from web3 import Web3
+from web3.middleware import construct_sign_and_send_raw_middleware
+from eth_account import Account as EthAccount
 from eth_tester import EthereumTester
 from eth_tester.backends.pyevm import PyEVMBackend
 
@@ -382,16 +384,11 @@ class EthBridge:
         self.network_name = f"External node ({self._rpc_url}, chain {self.chain_id})"
 
         # ── Account / signing setup ──────────────────────────────────────────
-        raw_pk = self._eth_private_key or os.environ.get("ETH_PRIVATE_KEY", "")
-        if raw_pk:
+        if self._eth_private_key:
             # Use an explicit private key — works on testnets & mainnet
-            from eth_account import Account as EthAccount  # lazy import
-            acct = EthAccount.from_key(raw_pk)
+            acct = EthAccount.from_key(self._eth_private_key)
             self._w3.middleware_onion.inject(
-                __import__(
-                    "web3.middleware",
-                    fromlist=["construct_sign_and_send_raw_middleware"],
-                ).construct_sign_and_send_raw_middleware(acct),
+                construct_sign_and_send_raw_middleware(acct),
                 layer=0,
             )
             self._account = acct.address
