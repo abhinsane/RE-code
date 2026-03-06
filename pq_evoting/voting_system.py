@@ -390,6 +390,11 @@ class ElectionAuthority:
         """ML-DSA-65 public key of the authority (for signature verification)."""
         return self._kp.sig_pk
 
+    @property
+    def authority_kem_pk(self) -> bytes:
+        """ML-KEM-768 public key of the authority (safe to share publicly)."""
+        return self._kp.kem_pk
+
     def get_voter_reg(self, voter_id: str):
         """Return the VoterRegistration for voter_id, or None if not found."""
         return self._registry.get(voter_id)
@@ -397,6 +402,37 @@ class ElectionAuthority:
     def chain_blocks(self) -> list:
         """Return a snapshot of the mined block list (read-only view)."""
         return list(self._chain.chain)
+
+    def cancel_voter_biometric(
+        self,
+        voter_id: str,
+        fingerprint_path: str,
+        old_token: bytes,
+        new_token: bytes,
+    ) -> bool:
+        """
+        Revoke a voter's biometric template and re-enrol with a new token.
+
+        Must only be called by the authority (holds the KEM secret key needed
+        to decrypt the stored template).  External callers must never receive
+        raw access to the KEM secret key — use this method instead.
+
+        Returns True on success, False if the voter is not found.
+        Raises ValueError if old-token verification fails.
+        """
+        reg = self._registry.get(voter_id)
+        if reg is None:
+            return False
+        new_template = self._bio.cancel_and_reenroll(
+            fingerprint_path,
+            old_token,
+            new_token,
+            self._kp.kem_pk,
+            self._kp.kem_sk,
+            reg.biometric_data,
+        )
+        reg.biometric_data = new_template
+        return True
 
     # ------------------------------------------------------------------
     # Blockchain statistics

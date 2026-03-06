@@ -46,16 +46,12 @@ from typing import Dict, List, Tuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from pq_evoting import (
-    CancellableBiometric,
     ElectionAuthority,
     ElectionConfig,
-    LatticeZKP,
-    PQKeyPair,
     Voter,
     create_synthetic_fingerprint,
     load_socofing_samples,
     pq_verify,
-    sha3_256,
 )
 
 
@@ -291,7 +287,7 @@ def _run_election(
 
     if show_chain:
         print("\n  Block summary:")
-        for blk in authority._chain.chain:
+        for blk in authority.chain_blocks():
             print(
                 f"    [{blk.index}] hash={blk.hash[:16]}…  "
                 f"votes={len(blk.votes)}  nonce={blk.nonce}"
@@ -305,21 +301,12 @@ def _run_election(
     old_token     = tokens[demo_voter_id]
     new_token     = hashlib.sha3_256(b"new_pin_after_compromise").digest()
     enrol_path, _ = fp_paths[demo_voter_id]
-    reg           = authority._registry.get(demo_voter_id)
 
-    if reg is not None:
-        bio = CancellableBiometric()
-        try:
-            new_template = bio.cancel_and_reenroll(
-                enrol_path,
-                old_token,
-                new_token,
-                authority._kp.kem_pk,
-                authority._kp.kem_sk,
-                reg.biometric_data,
-            )
-            # Update registry
-            reg.biometric_data = new_template
+    try:
+        ok = authority.cancel_voter_biometric(
+            demo_voter_id, enrol_path, old_token, new_token
+        )
+        if ok:
             tokens[demo_voter_id] = new_token
             print(
                 f"[Demo] Template for {demo_voter_id[:12]}… revoked and "
@@ -329,8 +316,10 @@ def _run_election(
                 "[Demo] Old biometric template is now cryptographically "
                 "unlinked from the new one."
             )
-        except Exception as exc:
-            print(f"[Demo] Cancellation skipped: {exc}")
+        else:
+            print(f"[Demo] Cancellation skipped: voter not found.")
+    except Exception as exc:
+        print(f"[Demo] Cancellation skipped: {exc}")
 
     _banner("Demo Complete")
     print("  All phases completed successfully.\n")
